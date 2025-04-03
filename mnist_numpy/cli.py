@@ -1,4 +1,5 @@
 import functools
+import os
 import pickle
 import re
 import time
@@ -147,7 +148,11 @@ def train(
 ) -> None:
     X_train, Y_train, X_test, Y_test = load_data(data_path)
 
-    seed = int(time.time())
+    seed = (
+        int(time.time())
+        if os.getenv("MNIST_NUMPY_SEED") is None
+        else int(os.getenv("MNIST_NUMPY_SEED"))
+    )
     np.random.seed(seed)
     logger.info(f"Training model with {seed=}.")
 

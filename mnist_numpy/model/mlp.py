@@ -281,8 +281,14 @@ class MultilayerPerceptron(ModelBase[MLP_Parameters, MLP_Gradient]):
 
     def empty_gradient(self) -> MLP_Gradient:
         return MLP_Gradient(
-            dW=tuple(np.zeros_like(w) for w in self._W),
-            db=tuple(np.zeros_like(b) for b in self._b),
+            dW=tuple(np.zeros_like(w) for w in self._params.W),
+            db=tuple(np.zeros_like(b) for b in self._params.b),
+        )
+
+    def empty_parameters(self) -> MLP_Parameters.Frozen:
+        return MLP_Parameters.Frozen(
+            W=tuple(np.zeros_like(w) for w in self._params.W),
+            b=tuple(np.zeros_like(b) for b in self._params.b),
         )
 
     @property

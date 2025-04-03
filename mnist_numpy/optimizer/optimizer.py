@@ -3,7 +3,6 @@ from collections import deque
 from typing import Any, Final, Protocol
 
 import numpy as np
-from loguru import logger
 
 from mnist_numpy.functions import cross_entropy, softmax
 from mnist_numpy.model.mlp import (  # TODO: Remove dependence
@@ -35,8 +34,6 @@ class NoOptimizer(OptimizerBase[Any]):
     def update(
         self, model: ModelT, X_train_batch: np.ndarray, Y_train_batch: np.ndarray
     ) -> None:
-        if self._iterations % 100 == 0:
-            old_params = model.parameters
         A_train_batch, Z_train_batch = model._forward_prop(X_train_batch)
         gradient = model._backward_prop(
             X_train_batch, Y_train_batch, Z_train_batch, A_train_batch
@@ -44,14 +41,6 @@ class NoOptimizer(OptimizerBase[Any]):
         model.update_parameters(
             -self._learning_rate * MLP_Parameters.Frozen.from_gradient(gradient)
         )
-        if self._iterations % 100 == 0:
-            new_params = model.parameters
-            logger.debug(f"Old parameters: {old_params[-2]}")
-            logger.debug(f"New parameters: {new_params[-2]}")
-            logger.debug(f"Gradient: {(-self._learning_rate * gradient)[-2]}")
-            logger.debug(
-                f"Old parameters - new parameters: {(old_params - new_params)[-2]}"
-            )
         self._iterations += 1
 
     def report(self) -> str:
@@ -88,7 +77,7 @@ class AdalmOptimizer(OptimizerBase[ModelT]):
         )
         self._k_batch = 1 / training_parameters.batch_size
         self._history = deque(
-            (model.empty_gradient(),),
+            (model.empty_parameters(),),
             maxlen=MAX_HISTORY_LENGTH,
         )
         self._iterations = 0
@@ -117,16 +106,16 @@ class AdalmOptimizer(OptimizerBase[ModelT]):
 
         prev_update = self._history[-1]
 
-        update = -MLP_Gradient(
-            dW=tuple(
-                self._learning_rate * (1 - self._momentum_parameter) * dW
+        update = MLP_Parameters.Frozen(
+            W=tuple(
+                -self._learning_rate * (1 - self._momentum_parameter) * dW
                 + self._momentum_parameter * prev_dW
-                for prev_dW, dW in zip(prev_update.dWs, gradient.dWs)
+                for prev_dW, dW in zip(prev_update.W, gradient.dW, strict=True)
             ),
-            db=tuple(
-                self._learning_rate * (1 - self._momentum_parameter) * db
+            b=tuple(
+                -self._learning_rate * (1 - self._momentum_parameter) * db
                 + self._momentum_parameter * prev_db
-                for prev_db, db in zip(prev_update.dbs, gradient.dbs)
+                for prev_db, db in zip(prev_update.b, gradient.db, strict=True)
             ),
         )
         model.update_parameters(update)

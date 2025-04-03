@@ -4,7 +4,7 @@ import re
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Callable, ParamSpec, TypeVar
+from typing import Callable, Final, ParamSpec, TypeVar
 
 import click
 import numpy as np
@@ -17,17 +17,22 @@ from mnist_numpy.model import (
     ModelBase,
     MultilayerPerceptron,
 )
-from mnist_numpy.train import (
-    DEFAULT_LEARNING_RATE,
-    DEFAULT_LEARNING_RATE_LIMITS,
-    DEFAULT_MOMENTUM_PARAMETER,
-    DEFAULT_NUM_EPOCHS,
-    DEFAULT_RESCALE_FACTOR_PER_EPOCH,
+from mnist_numpy.optimizer import (
     AdalmOptimizer,
     AdamOptimizer,
+    NoOptimizer,
+    OptimizerBase,
+)
+from mnist_numpy.train import (
     ModelTrainer,
     TrainingParameters,
 )
+
+DEFAULT_LEARNING_RATE: Final[float] = 0.1
+DEFAULT_LEARNING_RATE_LIMITS: Final[str] = "0.00001, 0.1"
+DEFAULT_MOMENTUM_PARAMETER: Final[float] = 0.9
+DEFAULT_NUM_EPOCHS: Final[int] = 10000
+DEFAULT_RESCALE_FACTOR_PER_EPOCH: Final[float] = 1.5
 
 P = ParamSpec("P")
 R = TypeVar("R")
@@ -112,10 +117,10 @@ def cli(): ...
 )
 @click.option(
     "-o",
-    "--optimizer",
-    type=click.Choice(["adam", "adalm"]),
+    "--optimizer-type",
+    type=click.Choice(["adam", "adalm", "no"]),
     help="The type of optimizer to use",
-    default="adam",
+    default="no",
 )
 @click.option(
     "-i",
@@ -135,7 +140,7 @@ def train(
     model_type: str,
     momentum_parameter: float,
     num_epochs: int,
-    optimizer: str,
+    optimizer_type: str,
     training_log_path: Path | None,
 ) -> None:
     X_train, Y_train, X_test, Y_test = load_data(data_path)
@@ -173,7 +178,8 @@ def train(
         total_epochs=num_epochs,
     )
 
-    match optimizer:
+    optimizer: OptimizerBase
+    match optimizer_type:
         case "adam":
             optimizer = AdamOptimizer(
                 model=model,
@@ -186,8 +192,12 @@ def train(
                 train_set_size=X_train.shape[0],
                 training_parameters=training_parameters,
             )
+        case "no":
+            optimizer = NoOptimizer(
+                training_parameters=training_parameters,
+            )
         case _:
-            raise ValueError(f"Invalid optimizer: {optimizer}")
+            raise ValueError(f"Invalid {optimizer_type=}.")
 
     ModelTrainer.train(
         model=model,

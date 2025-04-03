@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import pickle
 from dataclasses import dataclass
 from typing import IO, ClassVar, Self, Sequence
@@ -14,11 +16,23 @@ class MLP_Gradient:
     dWs: Sequence[np.ndarray]
     dbs: Sequence[np.ndarray]
 
-    def __add__(self, other: Self) -> Self:
-        return self.__class__(
-            dWs=tuple(dW1 + dW2 for dW1, dW2 in zip(self.dWs, other.dWs)),
-            dbs=tuple(db1 + db2 for db1, db2 in zip(self.dbs, other.dbs)),
-        )
+    def __add__(self, other: Self | MLP_Parameters) -> Self:
+        match other:
+            case MLP_Parameters():
+                return self.__class__(
+                    dWs=tuple(dW1 + dW2 for dW1, dW2 in zip(self.dWs, other.W)),
+                    dbs=tuple(db1 + db2 for db1, db2 in zip(self.dbs, other.b)),
+                )
+            case MLP_Gradient():
+                return self.__class__(
+                    dWs=tuple(dW1 + dW2 for dW1, dW2 in zip(self.dWs, other.dWs)),
+                    dbs=tuple(db1 + db2 for db1, db2 in zip(self.dbs, other.dbs)),
+                )
+            case _:
+                return NotImplemented
+
+    def __radd__(self, other: MLP_Parameters) -> Self:
+        return self + other
 
     def __neg__(self) -> Self:
         return self.__class__(
@@ -54,6 +68,8 @@ class MLP_Gradient:
             case tuple():
                 i, *rest = idx
                 return self.dWs[i][*rest], self.dbs[i][*rest]
+            case _:
+                return NotImplemented
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -61,20 +77,15 @@ class MLP_Parameters:
     W: Sequence[np.ndarray]
     b: Sequence[np.ndarray]
 
-    def __add__(self, other: Self | MLP_Gradient) -> Self:
+    def __add__(self, other: Self) -> Self:
         match other:
             case MLP_Parameters():
                 return self.__class__(
                     W=tuple(W1 + W2 for W1, W2 in zip(self.W, other.W)),
                     b=tuple(b1 + b2 for b1, b2 in zip(self.b, other.b)),
                 )
-            case MLP_Gradient():
-                return self.__class__(
-                    W=tuple(W1 + dW for W1, dW in zip(self.W, other.dWs)),
-                    b=tuple(b1 + db for b1, db in zip(self.b, other.dbs)),
-                )
             case _:
-                raise ValueError(f"Invalid type: {type(other)}")
+                return NotImplemented
 
     def unroll(self) -> tuple[Sequence[np.ndarray], Sequence[np.ndarray]]:
         return tuple(w.flatten() for w in self.W), tuple(b for b in self.b)
@@ -86,6 +97,8 @@ class MLP_Parameters:
             case tuple():
                 i, *rest = idx
                 return self.W[i][*rest], self.b[i][*rest]
+            case _:
+                return NotImplemented
 
 
 class MultilayerPerceptron(ModelBase[MLP_Parameters, MLP_Gradient]):

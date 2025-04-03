@@ -7,6 +7,7 @@ import numpy as np
 
 _ParametersT = TypeVar("_ParametersT")
 _GradientT = TypeVar("_GradientT")
+ModelT = TypeVar("ModelT", bound="ModelBase")
 
 
 class ModelBase(ABC, Generic[_ParametersT, _GradientT]):

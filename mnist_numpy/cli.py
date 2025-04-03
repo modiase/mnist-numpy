@@ -18,10 +18,12 @@ from mnist_numpy.model import (
     MultilayerPerceptron,
 )
 from mnist_numpy.optimizer import (
+    OptimizerBase,
+)
+from mnist_numpy.optimizer.optimizer import (  # TODO: import from package once cyclic dependency on MLP is gone
     AdalmOptimizer,
     AdamOptimizer,
     NoOptimizer,
-    OptimizerBase,
 )
 from mnist_numpy.train import (
     ModelTrainer,

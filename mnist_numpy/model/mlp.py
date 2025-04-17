@@ -1,14 +1,22 @@
 from __future__ import annotations
 
 import pickle
-from collections.abc import MutableSequence
+from collections.abc import Callable, MutableSequence
 from dataclasses import dataclass
 from itertools import chain
+from operator import itemgetter
 from typing import IO, Literal, Protocol, Self, Sequence, cast
 
 import numpy as np
+from more_itertools import last
 
-from mnist_numpy.functions import ReLU, identity
+from mnist_numpy.functions import (
+    ReLU,
+    cross_entropy,
+    get_activation_fn,
+    identity,
+    softmax,
+)
 from mnist_numpy.model import ModelBase
 from mnist_numpy.model.layer import (
     DenseLayer,
@@ -20,10 +28,20 @@ from mnist_numpy.model.layer import (
     RawOutputLayer,
     SoftmaxOutputLayer,
 )
-from mnist_numpy.types import ActivationFn, Activations, PreActivations
+from mnist_numpy.types import (
+    ActivationFn,
+    Activations,
+    LossContributor,
+)
 
 
 class GradientProto(Protocol):
+    @property
+    def _W(self) -> np.ndarray: ...
+
+    @property
+    def _B(self) -> np.ndarray: ...
+
     def __mul__(self, other: Self | float): ...
 
     def __rmul__(self, other: Self | float): ...
@@ -42,6 +60,16 @@ class GradientProto(Protocol):
 
 
 class MultiLayerPerceptron(ModelBase):
+    @dataclass(frozen=True, kw_only=True)
+    class Serialized:
+        @dataclass(frozen=True, kw_only=True)
+        class Layer:
+            activation_fn_name: str
+            neurons: int
+            parameters: tuple[np.ndarray, np.ndarray]
+
+        layers: tuple[Layer, ...]
+
     @dataclass
     class Gradient:
         dParams: Sequence[GradientProto]  # TODO: improve-types
@@ -121,6 +149,7 @@ class MultiLayerPerceptron(ModelBase):
         layer_neuron_counts: Sequence[int],
         activation_fn: ActivationFn = identity,
         output_layer_type: Literal["softmax", "raw"] = "softmax",
+        regularisers: Sequence[Callable[[Self], None]] = (),
     ) -> Self:
         if len(layer_neuron_counts) < 2:
             raise ValueError(f"{cls.__name__} must have at least 2 layers.")
@@ -128,21 +157,34 @@ class MultiLayerPerceptron(ModelBase):
             SoftmaxOutputLayer if output_layer_type == "softmax" else RawOutputLayer
         )
         layers: MutableSequence[Layer] = [InputLayer(neurons=layer_neuron_counts[0])]
-        for layer in layer_neuron_counts[1:-1]:
+        for layer_neuron_count in layer_neuron_counts[1:-1]:
             layers.append(
                 DenseLayer(
-                    neurons=layer,
+                    neurons=layer_neuron_count,
                     activation_fn=activation_fn,
                     previous_layer=layers[-1],
+                    parameters=DenseLayer.Parameters.he(
+                        dim_in=layers[-1].neurons, dim_out=layer_neuron_count
+                    )
+                    if activation_fn == ReLU
+                    else DenseLayer.Parameters.xavier(
+                        dim_in=layers[-1].neurons, dim_out=layer_neuron_count
+                    ),
                 )
             )
         layers.append(
             OutputLayerClass(
                 neurons=layer_neuron_counts[-1],
                 previous_layer=layers[-1],
+                parameters=DenseLayer.Parameters.xavier(
+                    dim_in=layers[-1].neurons, dim_out=layer_neuron_counts[-1]
+                ),
             )
         )
-        return cls(tuple(layers))
+        model = cls(tuple(layers))
+        for regulariser in regularisers:
+            regulariser(model)
+        return model
 
     def __init__(self, layers: Sequence[Layer]):  # noqa: F821
         if len(layers) < 2:
@@ -161,10 +203,21 @@ class MultiLayerPerceptron(ModelBase):
             )
         self._hidden_layers = cast(Sequence[HiddenLayerBase], layers[1:-1])
         self._As: MutableSequence[Activations] = []
-        self._Zs: MutableSequence[PreActivations] = []
-        self._dropout_masks: MutableSequence[np.ndarray | None] = []
+        self._Zs: MutableSequence[Activations] = []
         self._input_layer = layers[0]
         self._output_layer = layers[-1]
+        self._loss_contributors: MutableSequence[LossContributor] = []
+
+    def reinitialise(self) -> None:
+        for layer in self.non_input_layers:
+            layer.reinitialise()
+
+    @property
+    def loss_contributors(self) -> Sequence[LossContributor]:
+        return self._loss_contributors
+
+    def register_loss_contributor(self, contributor: LossContributor) -> None:
+        self._loss_contributors.append(contributor)
 
     @property
     def non_input_layers(self) -> Sequence[NonInputLayer]:
@@ -173,6 +226,13 @@ class MultiLayerPerceptron(ModelBase):
     @property
     def hidden_layers(self) -> Sequence[HiddenLayerBase]:
         return self._hidden_layers
+
+    def accept_hidden_layer_visitor(
+        self, visitor: Callable[[HiddenLayerBase, int], HiddenLayerBase]
+    ) -> None:
+        self._hidden_layers = tuple(
+            visitor(layer, index) for index, layer in enumerate(self.hidden_layers)
+        )
 
     @property
     def input_layer(self) -> InputLayer:
@@ -188,63 +248,40 @@ class MultiLayerPerceptron(ModelBase):
             chain((self.input_layer,), self.hidden_layers, (self.output_layer,))
         )
 
-    def forward_prop(
-        self,
-        X: np.ndarray,
-        *,
-        dropout_keep_prob: float = 1.0,
-        training: bool = False,
-    ) -> Activations:
+    def forward_prop(self, X: np.ndarray) -> Activations:
         self._Zs.clear()
         self._As.clear()
-        self._dropout_masks.clear()
 
-        Z, A = self.input_layer._forward_prop(As=Activations(X))
-        self._Zs.append(Z)
+        Z, A = itemgetter(slice(-1), -1)(
+            self.input_layer.forward_prop(As_prev=Activations(X))
+        )
+        self._Zs.append(
+            last(Z)
+        )  # If we ever need the pre-transformed pre-activations they are stored in Z
         self._As.append(A)
 
-        for layer in self.hidden_layers:
-            Z, A = layer._forward_prop(As=self._As[-1])
-
-            if training and dropout_keep_prob < 1.0:
-                dropout_mask = (np.random.rand(*A.shape) < dropout_keep_prob).astype(
-                    A.dtype
-                )
-                A = Activations(A * dropout_mask)
-                A = Activations(A / dropout_keep_prob)
-                self._dropout_masks.append(dropout_mask)
-            else:
-                self._dropout_masks.append(None)
-
-            self._Zs.append(Z)
+        for layer in self.non_input_layers:
+            Z, A = itemgetter(slice(-1), -1)(layer.forward_prop(As_prev=last(self._As)))
+            self._Zs.append(last(Z))
             self._As.append(A)
-
-        Z, A = self.output_layer._forward_prop(As=self._As[-1])
-        self._Zs.append(Z)
-        self._As.append(A)
 
         return Activations(A)
 
     def backward_prop(self, Y_true: np.ndarray) -> MultiLayerPerceptron.Gradient:
         dps = []
-        dp, dZ = self.output_layer._backward_prop(
-            Y_pred=self._As[-1],
+        dp, dZ = self.output_layer.backward_prop(
+            Y_pred=last(self._As),
             Y_true=Y_true,
-            As_prev=self._As[-2],
-            Zs_prev=self._Zs[-2],
+            As_prev=last(self._As[:-1]),
+            Zs_prev=last(self._Zs[:-1]),
         )
         dps.append(dp)
-        for layer, As_prev, Zs_prev, dropout_mask in zip(
+        for layer, As_prev, Zs_prev in zip(
             reversed(self.hidden_layers),
             reversed(self._As[:-2]),
             reversed(self._Zs[:-2]),
-            reversed(self._dropout_masks),
         ):
-            if dropout_mask is not None:
-                dZ *= dropout_mask
-                dZ /= dropout_mask.mean()
-
-            dp, dZ = layer._backward_prop(As_prev=As_prev, Zs_prev=Zs_prev, dZ=dZ)
+            dp, dZ = layer.backward_prop(As_prev=As_prev, Zs_prev=Zs_prev, dZ=dZ)
             dps.append(dp)
         return self.Gradient(dParams=tuple(reversed(dps)))  # type: ignore[arg-type] # TODO: Fix-types
 
@@ -263,37 +300,50 @@ class MultiLayerPerceptron(ModelBase):
 
     def dump(self, io: IO[bytes]) -> None:
         pickle.dump(
-            tuple(
-                chain(
-                    # TODO: Generalize
-                    (
-                        (layer.neurons, layer._parameters)
-                        for layer in self.hidden_layers
-                    ),  # type: ignore[attr-defined]
-                    ((self.output_layer.neurons, self.output_layer._parameters),),  # type: ignore[attr-defined]
-                )
+            self.Serialized(
+                layers=tuple(
+                    chain(
+                        # TODO: Generalize
+                        (
+                            self.Serialized.Layer(
+                                activation_fn_name=layer._activation_fn.name,  # TODO: Relies on private member
+                                neurons=layer.neurons,
+                                parameters=layer._parameters,
+                            )
+                            for layer in self.hidden_layers
+                        ),
+                        (
+                            self.Serialized.Layer(
+                                activation_fn_name=softmax.name,  # TODO: Generalize
+                                neurons=self.output_layer.neurons,
+                                parameters=self.output_layer._parameters,
+                            ),
+                        ),
+                    ),
+                ),
             ),
             io,
         )
 
     @classmethod
     def load(cls, source: IO[bytes]) -> Self:
-        layers = pickle.load(source)
-        hidden_layers, output_layer = layers[:-1], layers[-1]
-        layers = [InputLayer(neurons=784)]
-        for neurons, parameters in hidden_layers:
+        serialized = pickle.load(source)
+        hidden_layers, output_layer = itemgetter(slice(-1), -1)(serialized.layers)
+
+        layers: MutableSequence[Layer] = [InputLayer(neurons=784)]
+        for layer in hidden_layers:
             layers.append(
                 DenseLayer(
-                    neurons=neurons,
-                    activation_fn=ReLU,
-                    parameters=parameters,
+                    neurons=layer.neurons,
+                    activation_fn=get_activation_fn(layer.activation_fn_name),
+                    parameters=layer.parameters,
                     previous_layer=layers[-1],
                 )
             )
         layers.append(
             SoftmaxOutputLayer(
-                neurons=output_layer[0],
-                parameters=output_layer[1],
+                neurons=output_layer.neurons,
+                parameters=output_layer.parameters,
                 previous_layer=layers[-1],
             )
         )
@@ -309,4 +359,10 @@ class MultiLayerPerceptron(ModelBase):
     def empty_gradient(self) -> MultiLayerPerceptron.Gradient:
         return self.Gradient(
             dParams=tuple(layer.empty_parameters() for layer in self.non_input_layers)
+        )
+
+    def compute_loss(self, X: np.ndarray, Y_true: np.ndarray) -> float:
+        return sum(
+            (loss_contributor() for loss_contributor in self.loss_contributors),
+            start=1 / X.shape[0] * cross_entropy(self.forward_prop(X), Y_true),
         )

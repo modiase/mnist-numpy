@@ -1,15 +1,24 @@
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
+from collections.abc import Sequence
 from dataclasses import dataclass
-from typing import Generic, Self, TypeVar, cast
+from functools import reduce
+from itertools import chain
+from typing import Generic, Self, cast
 
 import numpy as np
+from more_itertools import last
 
-from mnist_numpy.functions import identity, softmax
-from mnist_numpy.types import ActivationFn, Activations, D, PreActivations
-
-_ParamType = TypeVar("_ParamType")
+from mnist_numpy.functions import ReLU, identity, softmax
+from mnist_numpy.types import (
+    ActivationFn,
+    Activations,
+    D,
+    HasWeightsAndBiases,
+    TrainingStepHandler,
+    _ParamType,
+)
 
 
 class _LayerBase(ABC, Generic[_ParamType]):
@@ -25,11 +34,40 @@ class _LayerBase(ABC, Generic[_ParamType]):
     ):
         self._activation_fn = activation_fn
         self._neurons = neurons
+        self._training_step_handlers: Sequence[TrainingStepHandler] = ()
+
+    def register_training_step_handler(self, handler: TrainingStepHandler) -> None:
+        self._training_step_handlers = tuple(
+            chain(self._training_step_handlers, (handler,))
+        )
+
+    def forward_prop(self, *, As_prev: Activations) -> tuple[Activations, ...]:
+        return tuple(
+            reduce(
+                lambda acc, handler: acc + [handler(last(acc))],  # type: ignore[operator]
+                chain(
+                    (handler.post_forward for handler in self._training_step_handlers),
+                    (self._activation_fn,),
+                ),
+                [
+                    self._forward_prop(
+                        As_prev=(
+                            reduce(
+                                lambda acc, handler: handler(acc),
+                                tuple(
+                                    handler.pre_forward
+                                    for handler in self._training_step_handlers
+                                ),
+                                As_prev,
+                            )
+                        )
+                    )
+                ],
+            )
+        )
 
     @abstractmethod
-    def _forward_prop(
-        self, *, As: Activations
-    ) -> tuple[PreActivations, Activations]: ...
+    def _forward_prop(self, *, As_prev: Activations) -> Activations: ...
 
     def _update_parameters(self, params: D[_ParamType]) -> None:
         self._parameters = params + self._parameters
@@ -41,9 +79,16 @@ class _LayerBase(ABC, Generic[_ParamType]):
     @abstractmethod
     def empty_parameters(self) -> _ParamType: ...
 
+    @abstractmethod
+    def reinitialise(self) -> None: ...
+
+    @property
+    def parameters(self) -> _ParamType:
+        return self._parameters
+
 
 @dataclass(kw_only=True, frozen=True)
-class DenseParameters:
+class DenseParameters(HasWeightsAndBiases):
     _W: np.ndarray
     _B: np.ndarray
 
@@ -58,6 +103,15 @@ class DenseParameters:
 
     def __radd__(self, other: Self | float) -> Self:
         return self.__add__(other)
+
+    def __neg__(self) -> Self:
+        return self.__class__(_W=-self._W, _B=-self._B)
+
+    def __sub__(self, other: Self | float) -> Self:
+        return self.__add__(-other)
+
+    def __rsub__(self, other: Self | float) -> Self:
+        return self.__sub__(other)
 
     def __mul__(self, other: float) -> Self:
         if not isinstance(other, float):
@@ -93,6 +147,20 @@ class DenseParameters:
         return cls(_W=np.random.randn(dim_in, dim_out), _B=np.zeros(dim_out))
 
     @classmethod
+    def xavier(cls, dim_in: int, dim_out: int) -> Self:
+        return cls(
+            _W=np.random.randn(dim_in, dim_out) * np.sqrt(1 / dim_in),
+            _B=np.zeros(dim_out),
+        )
+
+    @classmethod
+    def he(cls, dim_in: int, dim_out: int) -> Self:
+        return cls(
+            _W=np.random.normal(0, np.sqrt(2 / dim_in), (dim_in, dim_out)),
+            _B=np.zeros(dim_out),
+        )
+
+    @classmethod
     def eye(cls, dim: int) -> Self:
         return cls(_W=np.eye(dim), _B=np.zeros(dim))
 
@@ -104,14 +172,38 @@ class DenseParameters:
 class HiddenLayerBase(
     _LayerBase[_ParamType]
 ):  # TODO: Consider merging this with OutputLayerBase
+    def backward_prop(
+        self, *, As_prev: Activations, Zs_prev: Activations, dZ: D[Activations]
+    ) -> tuple[D[_ParamType], D[Activations]]:
+        return reduce(
+            lambda acc, handler: handler(*acc),
+            reversed(
+                tuple(handler.post_backward for handler in self._training_step_handlers)
+            ),
+            self._backward_prop(
+                As_prev=As_prev,
+                Zs_prev=Zs_prev,
+                dZ=reduce(
+                    lambda acc, handler: handler(acc),
+                    reversed(
+                        tuple(
+                            handler.pre_backward
+                            for handler in self._training_step_handlers
+                        )
+                    ),
+                    dZ,
+                ),
+            ),
+        )
+
     @abstractmethod
     def _backward_prop(
         self,
         *,
         As_prev: Activations,
-        Zs_prev: PreActivations,
-        dZ: D[PreActivations],
-    ) -> tuple[D[DenseParameters], D[PreActivations]]: ...
+        Zs_prev: Activations,
+        dZ: D[Activations],
+    ) -> tuple[D[_ParamType], D[Activations]]: ...
 
 
 class DenseLayer(HiddenLayerBase[DenseParameters]):
@@ -126,7 +218,10 @@ class DenseLayer(HiddenLayerBase[DenseParameters]):
         parameters: DenseParameters | None = None,
         previous_layer: Layer,
     ):
-        super().__init__(neurons=neurons, activation_fn=activation_fn)
+        super().__init__(
+            neurons=neurons,
+            activation_fn=activation_fn,
+        )
         self._previous_layer = previous_layer
         self._parameters = (
             parameters
@@ -134,17 +229,16 @@ class DenseLayer(HiddenLayerBase[DenseParameters]):
             else self.Parameters.random(previous_layer.neurons, self._neurons)
         )
 
-    def _forward_prop(self, As: Activations) -> tuple[PreActivations, Activations]:
-        preactivations = As @ self._parameters._W + self._parameters._B
-        return preactivations, self._activation_fn(preactivations)
+    def _forward_prop(self, *, As_prev: Activations) -> Activations:
+        return As_prev @ self._parameters._W + self._parameters._B
 
     def _backward_prop(
         self,
         *,
         As_prev: Activations,
-        Zs_prev: PreActivations,
-        dZ: D[PreActivations],
-    ) -> tuple[D[DenseParameters], D[PreActivations]]:
+        Zs_prev: Activations,
+        dZ: D[Activations],
+    ) -> tuple[D[DenseParameters], D[Activations]]:
         return cast(  # TODO: fix-types
             D[DenseParameters],
             self.Parameters.of(
@@ -167,21 +261,42 @@ class DenseLayer(HiddenLayerBase[DenseParameters]):
             dim_in=self._previous_layer.neurons, dim_out=self._neurons
         )
 
-    @property
-    def parameters(self) -> DenseParameters:
-        return self._parameters
+    def reinitialise(self) -> None:
+        self._parameters = (
+            self.Parameters.he(
+                dim_in=self._previous_layer.neurons, dim_out=self._neurons
+            )
+            if self._activation_fn == ReLU
+            else self.Parameters.xavier(
+                dim_in=self._previous_layer.neurons, dim_out=self._neurons
+            )
+        )
 
 
 class OutputLayerBase(_LayerBase[_ParamType]):
     @abstractmethod
-    def _backward_prop(
+    def backward_prop(
         self,
         *,
         Y_pred: Activations,
         Y_true: np.ndarray,
         As_prev: Activations,
-        Zs_prev: PreActivations,
-    ) -> tuple[D[DenseParameters], D[PreActivations]]: ...
+        Zs_prev: Activations,
+    ) -> tuple[D[DenseParameters], D[Activations]]: ...
+
+    @abstractmethod
+    def _backward_prop(
+        self,
+        *,
+        As_prev: Activations,
+        Zs_prev: Activations,
+        dZ: D[Activations],
+    ) -> tuple[D[DenseParameters], D[Activations]]: ...
+
+    # TODO: This can now be unified with DenseLayer
+    @property
+    def parameters(self) -> _ParamType:
+        return self._parameters
 
 
 class SoftmaxOutputLayer(OutputLayerBase[DenseParameters]):
@@ -194,7 +309,10 @@ class SoftmaxOutputLayer(OutputLayerBase[DenseParameters]):
         parameters: DenseParameters | None = None,
         previous_layer: Layer,
     ):
-        super().__init__(neurons=neurons, activation_fn=softmax)
+        super().__init__(
+            neurons=neurons,
+            activation_fn=softmax,
+        )
         self._previous_layer = previous_layer
         self._parameters = (
             parameters
@@ -202,15 +320,43 @@ class SoftmaxOutputLayer(OutputLayerBase[DenseParameters]):
             else self.Parameters.random(previous_layer.neurons, self._neurons)
         )
 
-    def _backward_prop(
+    def backward_prop(
         self,
         *,
         Y_pred: Activations,
         Y_true: np.ndarray,
         As_prev: Activations,
-        Zs_prev: PreActivations,
-    ) -> tuple[D[DenseParameters], D[PreActivations]]:
-        dZ = np.atleast_1d(Y_pred - Y_true)
+        Zs_prev: Activations,
+    ) -> tuple[D[DenseParameters], D[Activations]]:
+        return reduce(
+            lambda acc, handler: handler(*acc),
+            reversed(
+                tuple(handler.post_backward for handler in self._training_step_handlers)
+            ),
+            self._backward_prop(
+                As_prev=As_prev,
+                Zs_prev=Zs_prev,
+                dZ=reduce(
+                    lambda acc, handler: handler(acc),
+                    reversed(
+                        tuple(
+                            handler.pre_backward
+                            for handler in self._training_step_handlers
+                        )
+                    ),
+                    np.atleast_1d(Y_pred - Y_true),  # Specific to softmax
+                ),
+            ),
+        )
+
+    def _backward_prop(
+        self,
+        *,
+        As_prev: Activations,
+        Zs_prev: Activations,
+        dZ: D[Activations],
+    ) -> tuple[D[DenseParameters], D[Activations]]:
+        # TODO: This can now be unified with DenseLayer
         return cast(  # TODO: fix-types
             D[DenseParameters],
             self.Parameters.of(
@@ -224,9 +370,8 @@ class SoftmaxOutputLayer(OutputLayerBase[DenseParameters]):
             ),
         ), dZ @ self._parameters._W.T * self._activation_fn.deriv(Zs_prev)
 
-    def _forward_prop(self, As: Activations) -> tuple[PreActivations, Activations]:
-        As = As @ self._parameters._W + self._parameters._B
-        return PreActivations(As), self._activation_fn(As)
+    def _forward_prop(self, *, As_prev: Activations) -> Activations:
+        return As_prev @ self._parameters._W + self._parameters._B
 
     @property
     def neurons(self) -> int:
@@ -241,6 +386,11 @@ class SoftmaxOutputLayer(OutputLayerBase[DenseParameters]):
     def parameters(self) -> DenseParameters:
         return self._parameters
 
+    def reinitialise(self) -> None:
+        self._parameters = self.Parameters.xavier(
+            dim_in=self._previous_layer.neurons, dim_out=self._neurons
+        )
+
 
 class RawOutputLayer(SoftmaxOutputLayer):
     def __init__(
@@ -248,19 +398,31 @@ class RawOutputLayer(SoftmaxOutputLayer):
         *,
         neurons: int,
         previous_layer: Layer,
+        parameters: DenseParameters | None = None,
     ):
-        super().__init__(neurons=neurons, previous_layer=previous_layer)
+        super().__init__(
+            neurons=neurons,
+            previous_layer=previous_layer,
+            parameters=parameters,
+        )
         self._activation_fn = identity
 
 
 class InputLayer:
-    def __init__(self, *, neurons: int):
-        # TODO: fix-types
+    def __init__(
+        self,
+        *,
+        neurons: int,
+    ):
         self._neurons = neurons
+        self._training_step_handlers = ()
         self._activation_fn = identity
 
-    def _forward_prop(self, As: Activations) -> tuple[PreActivations, Activations]:
-        return cast(tuple[PreActivations, Activations], (As, As))
+    def forward_prop(self, *, As_prev: Activations) -> tuple[Activations, ...]:
+        return _LayerBase.forward_prop(self, As_prev=As_prev)  # type: ignore[arg-type]
+
+    def _forward_prop(self, *, As_prev: Activations) -> Activations:
+        return As_prev
 
     @property
     def neurons(self) -> int:
@@ -268,4 +430,4 @@ class InputLayer:
 
 
 Layer = InputLayer | _LayerBase
-NonInputLayer = _LayerBase
+NonInputLayer = HiddenLayerBase | OutputLayerBase

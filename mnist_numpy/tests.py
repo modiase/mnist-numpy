@@ -19,7 +19,8 @@ from mnist_numpy.model.layer.output import (
     RawOutputLayer,
     SoftmaxOutputLayer,
 )
-from mnist_numpy.model.layer.reshape import Reshape
+from mnist_numpy.model.layer.pool import MaxPooling2D
+from mnist_numpy.model.layer.reshape import Flatten, Reshape
 from mnist_numpy.optimizer.adam import AdaM
 from mnist_numpy.optimizer.base import Null
 from mnist_numpy.optimizer.scheduler import ConstantScheduler
@@ -364,8 +365,12 @@ def test_reshape_layer_backward_prop():
 
 
 def test_pad_input():
-    layer1 = Convolution2D(input_dimensions=(1, 5, 5), kernel_size=1, padding=1, n_kernels=1)
-    layer2 = Convolution2D(input_dimensions=(1, 5, 5), kernel_size=1, padding=2, n_kernels=1)
+    layer1 = Convolution2D(
+        input_dimensions=(1, 5, 5), kernel_size=1, padding=1, n_kernels=1
+    )
+    layer2 = Convolution2D(
+        input_dimensions=(1, 5, 5), kernel_size=1, padding=2, n_kernels=1
+    )
 
     input_activations = np.ones((5, 5)).reshape(1, 1, 5, 5)
     assert np.array_equal(
@@ -387,26 +392,53 @@ def test_pad_input():
         ),
     )
 
-def test_convolution_layer_output_shape():
-    layer1 = Convolution2D(input_dimensions=(1, 3, 3), kernel_size=1, padding=1, n_kernels=1)
+
+def test_convolution_2d_layer_output_shape():
+    layer1 = Convolution2D(
+        input_dimensions=(1, 3, 3), kernel_size=1, padding=1, n_kernels=1
+    )
     input_activations = np.ones((1, 1, 3, 3))
     output = layer1.forward_prop(input_activations=input_activations)
-    assert output.shape == tuple([input_activations.shape[0], *layer1.output_dimensions])
+    assert output.shape == tuple(
+        [input_activations.shape[0], *layer1.output_dimensions]
+    )
 
-    layer2 = Convolution2D(input_dimensions=(1, 3, 3), kernel_size=2, padding=1, n_kernels=1)
+    layer2 = Convolution2D(
+        input_dimensions=(1, 3, 3), kernel_size=2, padding=1, n_kernels=1
+    )
     input_activations = np.ones((1, 1, 3, 3))
     output = layer2.forward_prop(input_activations=input_activations)
-    assert output.shape == tuple([input_activations.shape[0], *layer2.output_dimensions])
+    assert output.shape == tuple(
+        [input_activations.shape[0], *layer2.output_dimensions]
+    )
 
-    layer3 = Convolution2D(input_dimensions=(1, 3, 3), kernel_size=2, padding=0, n_kernels=2)
+    layer3 = Convolution2D(
+        input_dimensions=(1, 3, 3), kernel_size=2, padding=0, n_kernels=2
+    )
     input_activations = np.ones((1, 1, 3, 3))
     output = layer3.forward_prop(input_activations=input_activations)
-    assert output.shape == tuple([input_activations.shape[0], *layer3.output_dimensions])
+    assert output.shape == tuple(
+        [input_activations.shape[0], *layer3.output_dimensions]
+    )
 
-def test_convolution_layer_forward_prop():
-    conv_layer = Convolution2D(input_dimensions=(1, 3, 3), kernel_size=2, padding=1, n_kernels=1)
-    conv_layer._kernel_weights = Convolution2D.Parameters(weights=np.ones((1, 1, 2, 2)), bias=np.array([-2]))
-    activation_layer = Activation(input_dimensions=conv_layer.output_dimensions, activation_fn=ReLU)
+
+def test_convolution_2d_layer_forward_prop():
+    def _kernel_init_fn(*args: object) -> Convolution2D.Parameters:
+        del args  # unused
+        return Convolution2D.Parameters(
+            weights=np.ones((1, 1, 2, 2)), biases=np.zeros((1, 4, 4)) - 2
+        )
+
+    conv_layer = Convolution2D(
+        input_dimensions=(1, 3, 3),
+        kernel_size=2,
+        padding=1,
+        n_kernels=1,
+        kernel_init_fn=_kernel_init_fn,
+    )
+    activation_layer = Activation(
+        input_dimensions=conv_layer.output_dimensions, activation_fn=ReLU
+    )
     # [[[[1, 1],
     #    [1, 1]]]]
     input_activations = np.ones((1, 1, 3, 3))
@@ -420,11 +452,93 @@ def test_convolution_layer_forward_prop():
     #    [0, 1, 1, 1, 0],
     #    [0, 1, 1, 1, 0],
     #    [0, 0, 0, 0, 0]]]]
-    output = activation_layer.forward_prop(input_activations=conv_layer.forward_prop(input_activations=input_activations))
-    expected_output = np.array([[[[0., 0., 0., 0.],
-                                  [0., 2., 2., 0.],
-                                  [0., 2., 2., 0.],
-                                  [0., 0., 0., 0.]]]])
+    output = activation_layer.forward_prop(
+        input_activations=conv_layer.forward_prop(input_activations=input_activations)
+    )
+    expected_output = np.array(
+        [
+            [
+                [
+                    [0.0, 0.0, 0.0, 0.0],
+                    [0.0, 2.0, 2.0, 0.0],
+                    [0.0, 2.0, 2.0, 0.0],
+                    [0.0, 0.0, 0.0, 0.0],
+                ]
+            ]
+        ]
+    )
     assert np.allclose(output, expected_output)
-    
-    
+
+
+def test_max_pool_2d_forward_prop():
+    pool_layer = MaxPooling2D(input_dimensions=(1, 2, 2), pool_size=2, stride=1)
+    input_activations = np.array([[[[1, 2], [3, 4]]]])
+    # [[[[1, 2],
+    #    [3, 4]]]]
+    output = pool_layer.forward_prop(input_activations=input_activations)
+    # [[[4]]]
+    assert np.allclose(output, np.array([[[[4]]]]))
+
+
+def test_max_pool_2d_backward_prop():
+    pool_layer = MaxPooling2D(input_dimensions=(1, 2, 2), pool_size=2, stride=1)
+    input_activations = np.array([[[[1, 2], [3, 4]]]])
+    pool_layer.forward_prop(input_activations=input_activations)
+    dZ = np.array([[[[1, 1], [1, 1]]]])
+    dX = pool_layer.backward_prop(dZ=dZ)
+    assert np.allclose(dX, np.array([[[[0, 0], [0, 1]]]]))
+
+    pool_layer = MaxPooling2D(input_dimensions=(1, 3, 3), pool_size=2, stride=1)
+    input_activations = np.array([[[[1, 2, 3], [4, 5, 6], [7, 8, 9]]]])
+    # [[[[1, 2, 3],
+    #    [4, 5, 6],
+    #    [7, 8, 9]]]]
+    pool_layer.forward_prop(input_activations=input_activations)
+    dZ = np.array([[[[1, 1], [1, 1]]]])
+    # [[[[1, 1],
+    #    [1, 1]]]]
+    dX = pool_layer.backward_prop(dZ=dZ)
+    # [[[[0, 0, 0],
+    #    [0, 1, 1],
+    #    [0, 1, 1]]]]
+    # Only the elements which are max at any point should be 1.
+    assert np.allclose(
+        dX,
+        np.array([[[[0, 0, 0], [0, 1, 1], [0, 1, 1]]]]),
+    )
+
+    pool_layer = MaxPooling2D(input_dimensions=(1, 3, 3), pool_size=2, stride=1)
+    input_activations = np.array([[[[1, 2, 3], [4, 10, 6], [7, 8, 9]]]])
+    # [[[[1, 2, 3],
+    #    [4, 10, 6],
+    #    [7, 8, 9]]]]
+    pool_layer.forward_prop(input_activations=input_activations)
+    dZ = np.array([[[[1, 1], [1, 1]]]])
+    # [[[[1, 1],
+    #    [1, 1]]]]
+    dX = pool_layer.backward_prop(dZ=dZ)
+    # [[[[0, 0, 0],
+    #    [0, 4, 0],
+    #    [0, 0, 0]]]]
+    # Only the elements which are max at any point should be 1.
+    assert np.allclose(
+        dX,
+        np.array([[[[0, 0, 0], [0, 4, 0], [0, 0, 0]]]]),
+    )
+
+
+def test_flatten_layer():
+    flatten_1 = Flatten(input_dimensions=(1, 2, 2))
+    input_activations = np.ones((2, 1, 2, 2))
+    output = flatten_1.forward_prop(input_activations=input_activations)
+    assert np.allclose(output, np.ones((2, 4)))
+
+    flatten_2 = Flatten(input_dimensions=(3, 2, 2))
+    input_activations = np.ones((1, 3, 2, 2))
+    output = flatten_2.forward_prop(input_activations=input_activations)
+    assert np.allclose(output, np.ones((1, 12)))
+
+    flatten_3 = Flatten(input_dimensions=((2, 3, 4, 5)))
+    input_activations = np.ones((10, 2, 3, 4, 5))
+    output = flatten_3.forward_prop(input_activations=input_activations)
+    assert np.allclose(output, np.ones((10, 120)))

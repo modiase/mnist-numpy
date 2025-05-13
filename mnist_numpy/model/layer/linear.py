@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Self, TypedDict, cast
 
-from more_itertools import last, one
+from more_itertools import one
 import numpy as np
 
 from mnist_numpy.functions import Identity, LeakyReLU, ReLU, Tanh

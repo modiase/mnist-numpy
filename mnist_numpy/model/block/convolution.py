@@ -20,28 +20,28 @@ class Convolution(Hidden):
         pool_size: int | tuple[int, int] = 2,
         pool_stride: int | tuple[int, int] = 1,
         pool_type: Literal["max"] = "max",
-        activation_function: ActivationFn = ReLU,
+        activation_fn: ActivationFn = ReLU,
         flatten_output: bool = False,
     ):
         del pool_type  # unused # TODO: Add average pooling
         super().__init__(
             layers=(
-                Convolution2D(
+                conv_layer := Convolution2D(
                     input_dimensions=input_dimensions,
                     n_kernels=n_kernels,
                     kernel_size=kernel_size,
                     stride=stride,
                 ),
-                MaxPooling2D(
-                    input_dimensions=input_dimensions,
+                pool_layer := MaxPooling2D(
+                    input_dimensions=conv_layer.output_dimensions,
                     pool_size=pool_size,
                     stride=pool_stride,
                 ),
                 Activation(
-                    input_dimensions=input_dimensions,
-                    activation_function=activation_function,
+                    input_dimensions=pool_layer.output_dimensions,
+                    activation_fn=activation_fn,
                 ),
             )
         )
         if flatten_output:
-            self.layers.append(Flatten(input_dimensions=input_dimensions))
+            self.append_layer(Flatten(input_dimensions=pool_layer.output_dimensions))

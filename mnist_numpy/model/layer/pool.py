@@ -45,25 +45,32 @@ class MaxPooling2D(Hidden):
         }
 
     def _forward_prop(self, *, input_activations: Activations) -> Activations:
-        batch_size, channels, h_in, w_in = input_activations.shape
-        h_out, w_out = self.output_dimensions[1], self.output_dimensions[2]
+        batch_size = input_activations.shape[0]
+        channels, h_out, w_out = self.output_dimensions
 
         output = np.zeros((batch_size, channels, h_out, w_out))
 
         self._cache["input_activations"] = input_activations
         self._cache["max_indices"] = np.zeros(
-            (batch_size, channels, h_out, w_out, 2), dtype=int
+            (
+                batch_size,
+                channels,
+                h_out,
+                w_out,
+                2,  # [y-idx, x-idx]
+            ),
+            dtype=int,
         )
 
         for h in range(h_out):
             for w in range(w_out):
-                h_start, h_end = (
-                    (h_start := h * self._stride_x),
-                    h_start + self._pool_size_x,
-                )
                 w_start, w_end = (
                     (w_start := w * self._stride_y),
                     w_start + self._pool_size_y,
+                )
+                h_start, h_end = (
+                    (h_start := h * self._stride_x),
+                    h_start + self._pool_size_x,
                 )
                 flattened_max_indices = np.argmax(
                     input_activations[:, :, h_start:h_end, w_start:w_end].reshape(
@@ -83,7 +90,10 @@ class MaxPooling2D(Hidden):
                 self._cache["max_indices"][:, :, h, w, 1] = w_indices
 
                 output[:, :, h, w] = input_activations[
-                    :, :, h_start + h_indices, w_start + w_indices
+                    np.arange(batch_size)[:, None],
+                    np.arange(channels)[None, :],
+                    h_start + h_indices,
+                    w_start + w_indices,
                 ]
 
         return output

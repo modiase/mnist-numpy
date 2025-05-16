@@ -28,7 +28,12 @@ from mnist_numpy.functions import (
     parse_activation_fn,
 )
 from mnist_numpy.model import MultiLayerPerceptron
+from mnist_numpy.model.block.base import Hidden, Output
+from mnist_numpy.model.block.convolution import Convolution
 from mnist_numpy.model.layer.dropout import attach_dropout_layers
+from mnist_numpy.model.layer.linear import Linear
+from mnist_numpy.model.layer.output import SoftmaxOutputLayer
+from mnist_numpy.model.layer.reshape import Reshape
 from mnist_numpy.protos import ActivationFn, NormalisationType
 from mnist_numpy.regulariser.weight_decay import attach_weight_decay_regulariser
 from mnist_numpy.train import (
@@ -258,6 +263,50 @@ def train(
             batch_size=batch_size,
             normalisation_type=normalisation_type,
             tracing_enabled=tracing_enabled,
+        )
+        model = MultiLayerPerceptron(
+            input_dimensions=(784,),
+            hidden_blocks=tuple(
+                [
+                    Hidden(
+                        layers=[
+                            Reshape(
+                                input_dimensions=(784,),
+                                output_dimensions=(1, 28, 28),
+                            )
+                        ]
+                    ),
+                    Convolution(
+                        input_dimensions=(1, 28, 28),
+                        kernel_size=5,
+                        n_kernels=1,
+                        flatten_output=True,
+                    ),
+                    # Convolution(
+                    #     input_dimensions=(10, 24, 24),
+                    #     kernel_size=3,
+                    #     n_kernels=2,
+                    # ),
+                    # Convolution(
+                    #     input_dimensions=(10, 22, 22),
+                    #     kernel_size=3,
+                    #     n_kernels=2,
+                    #     flatten_output=True,
+                    # ),
+                ]
+            ),
+            output_block=Output(
+                layers=[
+                    Linear(
+                        input_dimensions=(23 * 23,),
+                        output_dimensions=(10,),
+                        freeze_parameters=True,
+                    ),
+                ],
+                output_layer=SoftmaxOutputLayer(
+                    input_dimensions=(10,),
+                ),
+            ),
         )
     else:
         if len(dims) != 0:

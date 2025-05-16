@@ -144,6 +144,7 @@ class Convolution2D(Hidden):
         stride: int | tuple[int, int] = 1,
         # padding: int | tuple[int, int] = 0, # TODO: Implement padding.
         kernel_init_fn: KernelInitFn = Parameters.random,
+        freeze_parameters: bool = False,
     ):
         if len(input_dimensions) != 3:
             raise ValueError(
@@ -161,12 +162,12 @@ class Convolution2D(Hidden):
         self._stride_x, self._stride_y = (
             stride if isinstance(stride, tuple) else (stride, stride)
         )
-        self._out_width = (
-            input_dimensions[1] - self._kernel_width
-        ) // self._stride_x + 1
         self._out_height = (
-            input_dimensions[2] - self._kernel_height
+            input_dimensions[1] - self._kernel_height
         ) // self._stride_y + 1
+        self._out_width = (
+            input_dimensions[2] - self._kernel_width
+        ) // self._stride_x + 1
         self._in_channels = input_dimensions[0]
         output_dimensions = (
             self._in_channels * n_kernels,  # Channel
@@ -176,6 +177,7 @@ class Convolution2D(Hidden):
         super().__init__(
             input_dimensions=input_dimensions, output_dimensions=output_dimensions
         )
+        self._freeze_parameters = freeze_parameters
         self._n_kernels = n_kernels
         self._parameters = kernel_init_fn(
             n_kernels,
@@ -195,8 +197,8 @@ class Convolution2D(Hidden):
             (
                 (0, 0),
                 (0, 0),
-                (self._padding_x, self._padding_x),
                 (self._padding_y, self._padding_y),
+                (self._padding_x, self._padding_x),
             ),
             mode="constant",
             constant_values=(0, 0),
@@ -207,7 +209,7 @@ class Convolution2D(Hidden):
         self._cache["input_activations"] = input_activations
 
         output = np.zeros(
-            (batch_size, self._n_kernels, self._out_width, self._out_height)
+            (batch_size, self._n_kernels, self._out_height, self._out_width)
         )
 
         # TODO: This is a slow implementation because it uses explicit looping.
@@ -220,7 +222,7 @@ class Convolution2D(Hidden):
                             input_activations[batch_idx, channel_idx],
                             self._parameters.weights[kernel_idx, channel_idx],
                             mode="valid",
-                        )[:: self._stride_x, :: self._stride_y]
+                        )[:: self._stride_y, :: self._stride_x]
                         + self._parameters.biases[kernel_idx]
                     )
 
@@ -272,3 +274,10 @@ class Convolution2D(Hidden):
     @property
     def parameters(self) -> Parameters:
         return self._parameters
+
+    def update_parameters(self) -> None:
+        if self._cache["dP"] is None:
+            raise ValueError("Gradient not set during backward pass.")
+        if not self._freeze_parameters:
+            self._parameters = self._parameters + self._cache["dP"]
+        self._cache["dP"] = None

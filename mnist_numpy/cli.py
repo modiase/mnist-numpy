@@ -27,8 +27,13 @@ from mnist_numpy.functions import (
     Tanh,
     parse_activation_fn,
 )
-from mnist_numpy.model import MultiLayerPerceptron
+from mnist_numpy.model import Model
+from mnist_numpy.model.block.base import Hidden, Output
+from mnist_numpy.model.block.convolution import Convolution
 from mnist_numpy.model.layer.dropout import attach_dropout_layers
+from mnist_numpy.model.layer.linear import Linear
+from mnist_numpy.model.layer.output import SoftmaxOutputLayer
+from mnist_numpy.model.layer.reshape import Reshape
 from mnist_numpy.protos import ActivationFn, NormalisationType
 from mnist_numpy.regulariser.weight_decay import attach_weight_decay_regulariser
 from mnist_numpy.train import (
@@ -234,14 +239,14 @@ def train(
     np.random.seed(seed)
     logger.info(f"Training model with {seed=}.")
 
-    model: MultiLayerPerceptron
+    model: Model
     train_set_size = X_train.shape[0]
     batch_size = batch_size if batch_size is not None else train_set_size
 
     if model_path is None:
         if len(dims) == 0:
             dims = DEFAULT_DIMS
-        model = MultiLayerPerceptron.of(  # type: ignore[call-overload]
+        model = Model.of(  # type: ignore[call-overload]
             block_dimensions=(
                 tuple(
                     map(
@@ -259,12 +264,54 @@ def train(
             normalisation_type=normalisation_type,
             tracing_enabled=tracing_enabled,
         )
+        model = Model(
+            input_dimensions=(784,),
+            hidden_blocks=tuple(
+                [
+                    Hidden(
+                        layers=[
+                            Reshape(
+                                input_dimensions=(784,),
+                                output_dimensions=(1, 28, 28),
+                            )
+                        ]
+                    ),
+                    (
+                        conv_1 := Convolution(
+                            input_dimensions=(1, 28, 28),
+                            kernel_size=5,
+                            pool_size=5,
+                            n_kernels=2,
+                        )
+                    ),
+                    (
+                        conv_2 := Convolution(
+                            input_dimensions=conv_1.output_dimensions,
+                            kernel_size=3,
+                            n_kernels=2,
+                            flatten_output=True,
+                        )
+                    ),
+                ]
+            ),
+            output_block=Output(
+                layers=[
+                    Linear(
+                        input_dimensions=conv_2.output_dimensions,
+                        output_dimensions=(10,),
+                    ),
+                ],
+                output_layer=SoftmaxOutputLayer(
+                    input_dimensions=(10,),
+                ),
+            ),
+        )
     else:
         if len(dims) != 0:
             raise ValueError(
                 "Dims must not be provided when loading a model from a file."
             )
-        model = MultiLayerPerceptron.load(open(model_path, "rb"), training=True)
+        model = Model.load(open(model_path, "rb"), training=True)
 
     if dropout_keep_probs:
         attach_dropout_layers(
@@ -388,7 +435,7 @@ def infer(*, model_path: Path | None, data_path: Path):
         logger.error(f"File not found: {model_path}")
         sys.exit(1)
 
-    model = MultiLayerPerceptron.load(open(model_path, "rb"))
+    model = Model.load(open(model_path, "rb"))
 
     Y_pred = model.predict(X_train)
     Y_true = np.argmax(Y_train, axis=1)

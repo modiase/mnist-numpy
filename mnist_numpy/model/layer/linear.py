@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Callable, Self, TypedDict, cast
 
-from more_itertools import last, one
+from more_itertools import one
 import numpy as np
 
 from mnist_numpy.functions import Identity, LeakyReLU, ReLU, Tanh
@@ -166,21 +166,22 @@ class Linear(Hidden):
             Parameters.xavier
         ),
         store_output_activations: bool = False,  # Only used for tracing
+        freeze_parameters: bool = False,
     ):
         super().__init__(
             input_dimensions=input_dimensions,
             output_dimensions=output_dimensions,
         )
         self._parameters_init_fn = parameters_init_fn
+        self._freeze_parameters = freeze_parameters
         if parameters is not None:
-            # TODO: Check if this is correct - not sure I'm considering broadcasting correctly
-            if parameters._W.shape != (last(input_dimensions), last(output_dimensions)):
+            if parameters._W.shape != (one(input_dimensions), one(output_dimensions)):
                 raise ValueError(
                     f"Weight matrix shape ({parameters._W.shape}) "
                     f"does not match input dimensions ({input_dimensions}) "
                     f"and output dimensions ({output_dimensions})."
                 )
-            if parameters._B.shape != (last(output_dimensions),):
+            if parameters._B.shape != (one(output_dimensions),):
                 raise ValueError(
                     f"Bias vector shape ({parameters._B.shape}) "
                     f"does not match output dimensions ({output_dimensions})."
@@ -246,7 +247,8 @@ class Linear(Hidden):
     def update_parameters(self) -> None:
         if self._cache["dP"] is None:
             raise ValueError("Gradient not set during backward pass.")
-        self._parameters = self._parameters + self._cache["dP"]
+        if not self._freeze_parameters:
+            self._parameters = self._parameters + self._cache["dP"]
         self._cache["dP"] = None
 
     def gradient_operation(self, f: Callable[[GradLayer], None]) -> None:

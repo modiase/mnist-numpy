@@ -1,16 +1,14 @@
 from functools import partial
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Any, ContextManager, Final, Literal, assert_never, cast
+from typing import Any, ContextManager, Final, Literal, assert_never
 
 from mnist_numpy.data import RUN_PATH
 from mnist_numpy.train.exceptions import CheckFailed
 import numpy as np
-import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 

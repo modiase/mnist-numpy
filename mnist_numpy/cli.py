@@ -221,9 +221,12 @@ def cli(): ...
 )
 @click.option(
     "--log-level",
-    type=click.Choice(tuple(LogLevel)),
+    type=click.Choice(tuple(level.lower() for level in LogLevel)),
     help="Set the log level",
-    default="INFO",
+    default="info",
+    callback=lambda _, __, value: LogLevel(value.upper())
+    if isinstance(value, str)
+    else LogLevel.INFO,
 )
 def train(
     *,
@@ -269,6 +272,7 @@ def train(
         dropout_keep_probs=tuple(dropout_keep_probs),
         history_max_len=history_max_len,
         learning_rate_limits=learning_rate_limits,
+        log_level=log_level.value,
         max_restarts=max_restarts if not tracing_enabled else 0,
         monotonic=monotonic,
         no_monitoring=no_monitoring,

@@ -5,6 +5,7 @@ import numpy as np
 import pytest
 from more_itertools import one
 
+from mnist_numpy.constants import N_BYTES_PER_FLOAT
 from mnist_numpy.model.block.base import Hidden
 from mnist_numpy.model.layer.linear import Linear
 from mnist_numpy.model.model import Model
@@ -107,3 +108,10 @@ def test_serialize_deserialize():
 
     assert model.block_dimensions == deserialized.block_dimensions
     assert np.allclose(X_prop_before, X_prop_after)
+
+
+def test_gradient_size():
+    model = Model.mlp_of(module_dimensions=((2,), (2,), (2,)))
+    assert model.parameter_count == 2 * 6  # 2 x (4 weights, 2 biases)
+    assert model.grad_layers[0].parameter_nbytes == 6 * N_BYTES_PER_FLOAT
+    assert model.grad_layers[1].parameter_nbytes == 6 * N_BYTES_PER_FLOAT

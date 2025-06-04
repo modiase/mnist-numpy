@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import pickle
-from collections.abc import Callable, MutableSequence
+from collections.abc import Callable, Mapping, MutableSequence
 from dataclasses import dataclass
 from functools import partial, reduce
+from itertools import chain
 from operator import itemgetter
 from typing import (
     IO,
@@ -24,7 +25,7 @@ from mnist_numpy.functions import (
 from mnist_numpy.model import ModelBase
 from mnist_numpy.model.block.base import Base, Hidden, Output
 from mnist_numpy.model.block.norm import BatchNormOptions, LayerNormOptions, Norm
-from mnist_numpy.model.layer.base import Hidden as HiddenLayer
+from mnist_numpy.model.layer.base import Hidden as HiddenLayer, ParametrisedHidden
 from mnist_numpy.model.layer.dropout import Dropout
 from mnist_numpy.model.layer.output import RawOutputLayer
 from mnist_numpy.model.layer.input import Input
@@ -35,7 +36,6 @@ from mnist_numpy.protos import (
     ActivationFn,
     Activations,
     Dimensions,
-    GradLayer,
     HasDimensions,
     LossContributor,
     NormalisationType,
@@ -222,6 +222,9 @@ class Model(ModelBase):
             output if isinstance(output, Output) else Output(output_layer=output)
         )
         self._loss_contributors: MutableSequence[LossContributor] = []
+        self._layer_id_to_layer: Mapping[str, ParametrisedHidden] = {
+            layer.layer_id: layer for layer in self.grad_layers
+        }
 
     def reinitialise(self) -> None:
         for block in self.hidden_blocks:
@@ -315,12 +318,12 @@ class Model(ModelBase):
         )
 
     @property
-    def grad_layers(self) -> Sequence[GradLayer]:
+    def grad_layers(self) -> Sequence[ParametrisedHidden]:
         return tuple(
             layer
             for block in tuple([*self.hidden_blocks, self.output_block])
             for layer in block.layers
-            if isinstance(layer, GradLayer)
+            if isinstance(layer, ParametrisedHidden)
         )
 
     def get_gradient_caches(self) -> UpdateGradientType:
@@ -333,6 +336,10 @@ class Model(ModelBase):
     @property
     def parameter_count(self) -> int:
         return sum(block.parameter_count for block in self.blocks)
+
+    @property
+    def parameter_n_bytes(self) -> int:
+        return sum(layer.parameter_nbytes for layer in self.grad_layers)
 
     @property
     def block_dimensions(self) -> Sequence[tuple[Dimensions, Dimensions]]:
@@ -349,6 +356,27 @@ class Model(ModelBase):
 
     def prepend_layer(self, layer: HiddenLayer) -> None:
         first(self._hidden_blocks).prepend_layer(layer)
+
+    def get_layer(self, layer_id: str) -> ParametrisedHidden:
+        return self._layer_id_to_layer[layer_id]
+
+    @property
+    def layers(self) -> Sequence[Base]:
+        return tuple(
+            chain.from_iterable(
+                block.layers
+                if isinstance(block, Hidden)
+                else (block.layers, block.output_layer)
+                if isinstance(block, Output)
+                else (block,)
+                for block in chain(
+                    [self.input_layer], self.hidden_blocks, [self.output_block]
+                )
+            )
+        )
+
+    def print(self) -> str:
+        return ", ".join(f"{layer}" for layer in self.layers)
 
 
 type Regulariser = Callable[[Model], None]

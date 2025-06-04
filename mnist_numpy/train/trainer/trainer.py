@@ -1,16 +1,14 @@
 from functools import partial
 import time
 from collections.abc import Callable, Iterator, Sequence
-from contextlib import contextmanager, nullcontext, suppress
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
-from datetime import datetime
 from pathlib import Path
-from typing import Any, ContextManager, Final, Literal, assert_never, cast
+from typing import Any, ContextManager, Final, Literal, assert_never
 
 from mnist_numpy.data import RUN_PATH
 from mnist_numpy.train.exceptions import CheckFailed
 import numpy as np
-import pandas as pd
 from loguru import logger
 from tqdm import tqdm
 
@@ -125,7 +123,9 @@ class BasicTrainer:
         self._after_training_step: Sequence[AfterTrainingStepHandler] = ()
         self._last_update: UpdateGradientType | None = None
         self._L_val_min_epoch: int | None = None
-        self._on_shutdown_handlers: Sequence[Callable[[], None]] = ()
+        self._on_shutdown_handlers: Sequence[Callable[[], None]] = (
+            lambda: self._run.end_run(),
+        )
 
     def subscribe_to_after_training_step(
         self,
@@ -199,6 +199,7 @@ class BasicTrainer:
             f" for {self._training_parameters.num_epochs=} iterations"
             f" using optimizer {self._optimizer.__class__.__name__}."
         )
+        logger.info(f"{self._model.print()}")
         logger.info(
             f"Model has dimensions: {', '.join(f'[{dim}]' for dim in self._model.block_dimensions)} and parameter count: {self._model.parameter_count}."
         )
@@ -250,9 +251,6 @@ class BasicTrainer:
             return self._training_loop()
 
     def _before_training_loop(self) -> None:
-        self.subscribe_to_shutdown(
-            lambda: self._run.end_run(),
-        )
         if self._training_parameters.max_restarts > 0:
             self._optimizer.snapshot()
 
@@ -318,13 +316,13 @@ class BasicTrainer:
                     case never:
                         assert_never(never)
 
-                self._run.log_iteration(
-                    epoch=self._training_parameters.current_epoch(i),
-                    batch=i,
-                    batch_loss=L_batch,
-                    val_loss=L_val,
-                    learning_rate=self._optimizer.learning_rate,
-                )
+            self._run.log_iteration(
+                epoch=self._training_parameters.current_epoch(i),
+                batch=i,
+                batch_loss=L_batch,
+                val_loss=L_val,
+                learning_rate=self._optimizer.learning_rate,
+            )
 
             if time.time() - last_log_time > DEFAULT_LOG_INTERVAL_SECONDS:
                 tqdm.write(
@@ -337,6 +335,13 @@ class BasicTrainer:
                 )
                 last_log_time = time.time()
 
+        self._run.log_iteration(
+            epoch=self._training_parameters.num_epochs,
+            batch=self._training_parameters.total_batches,
+            batch_loss=L_batch,
+            val_loss=L_val,
+            learning_rate=self._optimizer.learning_rate,
+        )
         return TrainingSuccessful(
             model_checkpoint_path=self._model_checkpoint_path,
         )
